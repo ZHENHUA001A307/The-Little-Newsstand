@@ -30,93 +30,89 @@ jobs:
           import datetime
           import ebooklib
           import zipfile
+          import re
           from ebooklib import epub
           from bs4 import BeautifulSoup
 
           # 1. 读取进度数字
           try:
               with open('progress.txt', 'r') as f:
-                  content = f.read().strip()
-                  current_index = int(content)
-          except Exception as e:
-              print(f"DEBUG: 读取 progress.txt 失败，默认从 1 开始: {e}")
+                  current_index = int(f.read().strip())
+          except:
               current_index = 1
 
           # 2. 扫描文件夹
           search_str = f"{current_index:0>3}"
           target_file = None
-          if not os.path.exists('books'):
-              print("DEBUG: 错误！找不到名为 'books' 的文件夹。")
-              exit(1)
-          else:
-              all_files = os.listdir('books')
-              for f in all_files:
+          if os.path.exists('books'):
+              for f in os.listdir('books'):
                   if search_str in f and f.lower().endswith('.epub'):
                       target_file = os.path.join('books', f)
                       break
 
           if not target_file:
-              print(f"DEBUG: 匹配失败。没找到包含 '{search_str}' 的 epub 文件。")
-              exit(1)
+              print(f"DEBUG: 没找到序号 {search_str} 的文件，跳过本次更新。")
+              exit(0) # 没找到文件不报错，直接退出
 
-          print(f"DEBUG: 尝试解析文件: {target_file}")
-
-          # 3. 增强版解析 EPUB (处理损坏的 Manifest)
+          # 3. 解析内容 (带崩溃恢复)
           content_html = ""
           try:
-              # 尝试正常读取
               book = epub.read_epub(target_file)
               for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
                   soup = BeautifulSoup(item.get_content(), 'html.parser')
-                  for img in soup.find_all('img'):
-                      img.decompose()
+                  for img in soup.find_all('img'): img.decompose()
                   body = soup.find('body')
-                  if body:
-                      content_html += "".join([str(c) for c in body.contents])
-          except Exception as e:
-              print(f"DEBUG: ebooklib 无法正常解析 ({e})，切换至强制提取模式...")
-              # 兜底方案：直接从 Zip 压缩包里捞所有的 html/xhtml 文件
+                  if body: content_html += "".join([str(c) for c in body.contents])
+          except:
               with zipfile.ZipFile(target_file, 'r') as z:
-                  # 找到所有可能是内容的文件，按字母顺序排序
-                  content_files = [f for f in z.namelist() if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                  content_files.sort() 
-                  
+                  content_files = sorted([f for f in z.namelist() if f.lower().endswith(('.html', '.xhtml'))])
                   for f_name in content_files:
                       with z.open(f_name) as f:
                           soup = BeautifulSoup(f.read(), 'html.parser')
-                          for img in soup.find_all('img'):
-                              img.decompose()
+                          for img in soup.find_all('img'): img.decompose()
                           body = soup.find('body')
-                          if body:
-                              content_html += "".join([str(c) for c in body.contents])
+                          if body: content_html += "".join([str(c) for c in body.contents])
 
-          if not content_html:
-              print("DEBUG: 错误，未能从文件中提取到任何内容。")
-              exit(1)
-
-          # 4. 生成 RSS
+          # 4. 构造当前的新条目 (New Item)
           pub_date = datetime.datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')
+          file_name = os.path.basename(target_file)
+          new_item = f"""        <item>
+              <title>{file_name}</title>
+              <description><![CDATA[{content_html}]]></description>
+              <pubDate>{pub_date}</pubDate>
+              <guid isPermaLink="false">{current_index}</guid>
+          </item>"""
+
+          # 5. 读取旧条目并合并 (核心逻辑)
+          all_items = [new_item]
+          if os.path.exists('feed.xml'):
+              with open('feed.xml', 'r', encoding='utf-8') as f:
+                  old_feed = f.read()
+                  # 使用正则表达式提取所有现有的 <item>...</item> 块
+                  old_items = re.findall(r'<item>.*?</item>', old_feed, re.DOTALL)
+                  all_items.extend(old_items)
+
+          # 只保留最近的 15 条
+          all_items = all_items[:15]
+          items_html = "\n".join(all_items)
+
+          # 6. 生成最终的 RSS 文件
           rss_feed = f"""<?xml version="1.0" encoding="UTF-8" ?>
           <rss version="2.0">
           <channel>
               <title>我的每日小说</title>
               <link>https://github.com/${{ github.repository }}</link>
-              <item>
-                  <title>{os.path.basename(target_file)}</title>
-                  <description><![CDATA[{content_html}]]></description>
-                  <pubDate>{pub_date}</pubDate>
-                  <guid>{current_index}</guid>
-              </item>
+              <description>从 EPUB 自动生成的 RSS 订阅源</description>
+          {items_html}
           </channel>
           </rss>"""
 
           with open('feed.xml', 'w', encoding='utf-8') as f:
               f.write(rss_feed)
 
-          # 5. 更新进度
+          # 7. 更新进度
           with open('progress.txt', 'w') as f:
               f.write(str(current_index + 1))
-          print(f"DEBUG: 任务完成，进度已更新为 {current_index + 1}。")
           EOF
 
       - name: Commit and Push
@@ -124,5 +120,5 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add feed.xml progress.txt
-          git commit -m "Update RSS: Sent chapter $(cat progress.txt)" || echo "Nothing to commit"
+          git commit -m "Update RSS: Added chapter $(cat progress.txt)" || echo "Nothing to commit"
           git push
