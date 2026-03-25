@@ -2,8 +2,8 @@ name: EPUB to RSS Pusher
 
 on:
   schedule:
-    - cron: '0 0 */2 * *'
-  workflow_dispatch:
+    - cron: '0 0 */2 * *' # 每两天运行一次
+  workflow_dispatch: # 支持手动触发
 
 permissions:
   contents: write
@@ -31,8 +31,15 @@ jobs:
           import ebooklib
           import zipfile
           import re
+          import math
           from ebooklib import epub
           from bs4 import BeautifulSoup
+
+          # ================= 配置区 =================
+          # 您可以根据自己的阅读习惯调整这里的数字
+          # 普通人中文阅读速度约为 300-500 字/分钟
+          READING_SPEED = 400 
+          # ==========================================
 
           # 1. 读取进度数字
           try:
@@ -52,7 +59,7 @@ jobs:
 
           if not target_file:
               print(f"DEBUG: 没找到序号 {search_str} 的文件，跳过本次更新。")
-              exit(0) # 没找到文件不报错，直接退出
+              exit(0)
 
           # 3. 解析内容 (带崩溃恢复)
           content_html = ""
@@ -73,6 +80,20 @@ jobs:
                           body = soup.find('body')
                           if body: content_html += "".join([str(c) for c in body.contents])
 
+          # --- 计算阅读时间逻辑 ---
+          # 1. 临时去掉 HTML 标签统计纯文字字数
+          temp_soup = BeautifulSoup(content_html, 'html.parser')
+          pure_text = temp_soup.get_text()
+          word_count = len(pure_text.strip())
+          
+          # 2. 计算分钟（向上取整）
+          reading_time = math.ceil(word_count / READING_SPEED)
+          
+          # 3. 构造时间提示行，并拼接到正文最前面
+          time_header = f"<p style='color: #888;'>⏱ 预计阅读时间：{reading_time} 分钟 ({word_count} 字)</p><hr>"
+          content_html = time_header + content_html
+          # -----------------------
+
           # 4. 构造当前的新条目 (New Item)
           pub_date = datetime.datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')
           file_name = os.path.basename(target_file)
@@ -83,16 +104,15 @@ jobs:
               <guid isPermaLink="false">{current_index}</guid>
           </item>"""
 
-          # 5. 读取旧条目并合并 (核心逻辑)
+          # 5. 读取旧条目并合并
           all_items = [new_item]
           if os.path.exists('feed.xml'):
               with open('feed.xml', 'r', encoding='utf-8') as f:
                   old_feed = f.read()
-                  # 使用正则表达式提取所有现有的 <item>...</item> 块
                   old_items = re.findall(r'<item>.*?</item>', old_feed, re.DOTALL)
                   all_items.extend(old_items)
 
-          # 只保留最近的 15 条
+          # 只保留最近 15 条
           all_items = all_items[:15]
           items_html = "\n".join(all_items)
 
@@ -120,5 +140,5 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add feed.xml progress.txt
-          git commit -m "Update RSS: Added chapter $(cat progress.txt)" || echo "Nothing to commit"
+          git commit -m "Update RSS: Added chapter with reading time" || echo "Nothing to commit"
           git push
